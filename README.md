@@ -60,7 +60,7 @@ Cross-Origin Isolation is **not** required for the default `@ffmpeg/ffmpeg` + `@
 |--------|----------|
 | Photos | Canvas 2D, `createImageBitmap` when available |
 | Videos (desktop) | `@ffmpeg/ffmpeg` + `@ffmpeg/core` + `@ffmpeg/util` from jsDelivr CDN |
-| Videos (iOS / fallback) | Canvas `captureStream` + `MediaRecorder` (mp4 or webm) — marker `ios-phone-encoder-v1` |
+| Videos (iOS / fallback) | Canvas `captureStream` + AudioContext audio mux + `MediaRecorder` (mp4 or webm) — marker `ios-phone-encoder-v2-keep-audio` |
 | UI | Vanilla HTML / CSS / JS |
 
 On iPhone/iPad, ffmpeg.wasm is skipped (it often hangs without SharedArrayBuffer / under memory pressure). The status line shows **Using phone encoder…** instead of a stuck “Initializing ffmpeg core…”. Desktop Chrome/Firefox still preload and use ffmpeg; if load takes longer than ~18s, the app falls back to MediaRecorder.
@@ -72,6 +72,7 @@ On iPhone/iPad, ffmpeg.wasm is skipped (it often hangs without SharedArrayBuffer
 - Solid pad is the default fast path. Blur pad on video uses an ffmpeg filter graph (or canvas blur on the phone path); if it fails, the app retries with a solid black pad.
 - Preview for video approximates Fit/Fill with CSS `object-fit`; the exported file uses exact scale/crop/pad.
 - Phone encoder may produce WebM when MP4 isn’t supported by MediaRecorder; WhatsApp’s iOS share sheet usually accepts both.
+- Phone encoder keeps original audio via `AudioContext` + `MediaElementSource` muxed into the recorded stream. If the browser blocks that path, export still succeeds with a clear **Audio couldn’t be kept on this browser** warning.
 
 ## License
 

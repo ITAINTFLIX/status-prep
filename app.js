@@ -2,7 +2,7 @@
  * Status Prep — WhatsApp Status photo/video preparation
  * Runs entirely in-browser. Photos via Canvas; videos via ffmpeg.wasm
  * (desktop) or Canvas + MediaRecorder (iOS / ffmpeg fallback).
- * Marker: ios-phone-encoder-v1
+ * Marker: ios-phone-encoder-v2-keep-audio
  */
 
 const RES_MAP = {
@@ -37,6 +37,8 @@ const state = {
   ffmpegFailed: false,
   lastVideoMime: "video/mp4",
   lastVideoExt: "mp4",
+  lastExportKeptAudio: true,
+  lastAudioWarning: "",
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -571,6 +573,8 @@ function drawVideoFrameToCanvas(ctx, video, W, H) {
 /**
  * Canvas + MediaRecorder path for iOS / Safari / ffmpeg failure.
  * Draws 9:16 frames, honors trim, prefers mp4 then webm.
+ * Muxes original video audio via AudioContext (canvas.captureStream has no audio).
+ * Marker: ios-phone-encoder-v2-keep-audio
  */
 async function exportVideoMediaRecorder() {
   if (typeof MediaRecorder === "undefined") {
@@ -591,6 +595,8 @@ async function exportVideoMediaRecorder() {
   const isWebm = mime.includes("webm");
   state.lastVideoMime = isWebm ? "video/webm" : "video/mp4";
   state.lastVideoExt = isWebm ? "webm" : "mp4";
+  state.lastExportKeptAudio = false;
+  state.lastAudioWarning = "";
   updateExportLabel();
 
   const canvas = document.createElement("canvas");
@@ -601,7 +607,11 @@ async function exportVideoMediaRecorder() {
   // Dedicated video element so we can seek / unmute without fighting the preview.
   const video = document.createElement("video");
   video.playsInline = true;
+  video.setAttribute("playsinline", "");
+  video.setAttribute("webkit-playsinline", "");
+  // iOS Safari often blocks MediaElementSource if muted — unmute for capture.
   video.muted = false;
+  video.volume = 1;
   video.preload = "auto";
   video.src = state.video;
   video.crossOrigin = "anonymous";
@@ -632,28 +642,99 @@ async function exportVideoMediaRecorder() {
   });
 
   const fps = 30;
-  let stream;
+  let canvasStream;
   try {
-    stream = canvas.captureStream(fps);
+    canvasStream = canvas.captureStream(fps);
   } catch (err) {
     throw new Error("Canvas captureStream is not supported on this browser.");
   }
 
-  // Best-effort audio from the source video.
-  try {
-    if (typeof video.captureStream === "function") {
-      const vStream = video.captureStream();
-      const audioTracks = vStream.getAudioTracks();
-      if (audioTracks.length) {
-        stream.addTrack(audioTracks[0]);
-      }
+  // Mux original video audio: canvas.captureStream() alone has no audio.
+  // Prefer AudioContext + MediaElementSource → MediaStreamDestination.
+  let audioCtx = null;
+  let audioDest = null;
+  let mediaSource = null;
+  let keptAudio = false;
+  let audioWarning = "";
+
+  const tryAttachAudioViaContext = () => {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) throw new Error("AudioContext unavailable");
+    audioCtx = new AC();
+    if (audioCtx.state === "suspended" && typeof audioCtx.resume === "function") {
+      // Share / Download click is a user gesture — resume may still be needed.
+      audioCtx.resume().catch(() => {});
     }
-  } catch (err) {
-    console.warn("Audio capture unavailable", err);
+    mediaSource = audioCtx.createMediaElementSource(video);
+    audioDest = audioCtx.createMediaStreamDestination();
+    mediaSource.connect(audioDest);
+    // Also connect to destination at near-silent gain so some engines keep the graph alive
+    // without blasting speaker during encode (iOS often needs a live graph).
+    try {
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0.0001;
+      mediaSource.connect(gain);
+      gain.connect(audioCtx.destination);
+    } catch {
+      /* optional */
+    }
+    const tracks = audioDest.stream.getAudioTracks();
+    if (!tracks.length) throw new Error("No audio tracks from MediaStreamDestination");
+    return tracks;
+  };
+
+  const tryAttachAudioViaCaptureStream = () => {
+    if (typeof video.captureStream !== "function" && typeof video.mozCaptureStream !== "function") {
+      throw new Error("HTMLVideoElement.captureStream unavailable");
+    }
+    const vStream = (video.captureStream || video.mozCaptureStream).call(video);
+    const tracks = vStream.getAudioTracks();
+    if (!tracks.length) throw new Error("No audio tracks from video.captureStream");
+    return tracks;
+  };
+
+  let audioTracks = [];
+  try {
+    audioTracks = tryAttachAudioViaContext();
+    keptAudio = true;
+  } catch (err1) {
+    console.warn("AudioContext mux failed, trying video.captureStream", err1);
+    try {
+      // Clean up partial AudioContext if createMediaElementSource already consumed the element
+      if (audioCtx) {
+        try { audioCtx.close(); } catch { /* ignore */ }
+        audioCtx = null;
+        audioDest = null;
+        mediaSource = null;
+      }
+      audioTracks = tryAttachAudioViaCaptureStream();
+      keptAudio = true;
+    } catch (err2) {
+      console.warn("Audio capture unavailable", err2);
+      audioTracks = [];
+      keptAudio = false;
+      audioWarning = "Audio couldn’t be kept on this browser";
+    }
+  }
+
+  const stream = keptAudio
+    ? new MediaStream([...canvasStream.getVideoTracks(), ...audioTracks])
+    : canvasStream;
+
+  state.lastExportKeptAudio = keptAudio;
+  state.lastAudioWarning = audioWarning;
+  if (audioWarning) {
+    setStatus(audioWarning, "error");
+    ffmpegMsg.textContent = `Using phone encoder… (${audioWarning})`;
   }
 
   const chunks = [];
-  const recorderOpts = mime ? { mimeType: mime, videoBitsPerSecond: 8_000_000 } : { videoBitsPerSecond: 8_000_000 };
+  const recorderOpts = mime
+    ? { mimeType: mime, videoBitsPerSecond: 8_000_000 }
+    : { videoBitsPerSecond: 8_000_000 };
+  if (keptAudio) {
+    recorderOpts.audioBitsPerSecond = 192_000;
+  }
   let recorder;
   try {
     recorder = new MediaRecorder(stream, recorderOpts);
@@ -682,7 +763,9 @@ async function exportVideoMediaRecorder() {
     const t = video.currentTime || 0;
     const pct = Math.min(95, Math.round((t / endTime) * 100));
     ffmpegProgress.style.width = `${Math.max(10, pct)}%`;
-    ffmpegMsg.textContent = `Using phone encoder… ${pct}%`;
+    ffmpegMsg.textContent = keptAudio
+      ? `Using phone encoder… ${pct}%`
+      : `Using phone encoder… ${pct}% (no audio)`;
     rafId = requestAnimationFrame(drawLoop);
   };
 
@@ -692,11 +775,25 @@ async function exportVideoMediaRecorder() {
   rafId = requestAnimationFrame(drawLoop);
 
   try {
+    video.muted = false;
     await video.play();
   } catch (err) {
-    // If unmuted play fails, retry muted (no audio track then).
+    console.warn("Unmuted play failed; retrying muted (audio may be lost)", err);
     video.muted = true;
     await video.play();
+    if (keptAudio) {
+      // Tracks may still flow while muted on some engines; if not, warn.
+      keptAudio = false;
+      audioWarning = "Audio couldn’t be kept on this browser";
+      state.lastExportKeptAudio = false;
+      state.lastAudioWarning = audioWarning;
+      setStatus(audioWarning, "error");
+    }
+  }
+
+  // Ensure AudioContext is running after play (gesture already happened for Share).
+  if (audioCtx && audioCtx.state === "suspended") {
+    try { await audioCtx.resume(); } catch { /* ignore */ }
   }
 
   await new Promise((resolve, reject) => {
@@ -741,6 +838,14 @@ async function exportVideoMediaRecorder() {
   } catch {
     /* ignore */
   }
+  try {
+    canvasStream.getTracks().forEach((t) => t.stop());
+  } catch {
+    /* ignore */
+  }
+  if (audioCtx) {
+    try { await audioCtx.close(); } catch { /* ignore */ }
+  }
   video.pause();
   video.removeAttribute("src");
   video.load();
@@ -751,8 +856,8 @@ async function exportVideoMediaRecorder() {
 
   const blob = new Blob(chunks, { type: state.lastVideoMime });
   ffmpegProgress.style.width = "100%";
-  ffmpegMsg.textContent = "Done (phone encoder)";
-  setStatus("");
+  ffmpegMsg.textContent = keptAudio ? "Done (phone encoder, audio kept)" : "Done (phone encoder, no audio)";
+  if (!audioWarning) setStatus("");
   return blob;
 }
 
@@ -819,26 +924,61 @@ async function exportVideoFFmpeg() {
   ffmpegMsg.textContent = "Encoding H.264…";
   ffmpegProgress.style.width = "30%";
 
-  try {
-    await runEncode(true);
-  } catch (e) {
-    console.warn("Encode with audio failed, retrying without audio", e);
+  state.lastExportKeptAudio = true;
+  state.lastAudioWarning = "";
+
+  const wipeOut = async () => {
     try {
       await ffmpeg.deleteFile(outName);
     } catch {
       /* may not exist */
     }
+  };
+
+  try {
+    await runEncode(true);
+  } catch (e) {
+    console.warn("Encode with audio / blur failed, retrying while keeping audio", e);
+    await wipeOut();
+    let recovered = false;
     if (useBlurPad) {
       const savedPad = state.pad;
       state.pad = "solid";
       state.padColor = "#000000";
       try {
-        await runEncode(false);
+        // Keep -map 0:a? / AAC — do not strip audio on blur fallback.
+        await runEncode(true);
+        recovered = true;
+      } catch (e2) {
+        console.warn("Solid pad with audio also failed", e2);
       } finally {
         state.pad = savedPad;
       }
-    } else {
-      await runEncode(false);
+    }
+    if (!recovered) {
+      await wipeOut();
+      try {
+        await runEncode(true);
+        recovered = true;
+      } catch (e3) {
+        console.warn("Re-encode with audio failed; last resort without audio", e3);
+        await wipeOut();
+        if (useBlurPad) {
+          const savedPad = state.pad;
+          state.pad = "solid";
+          state.padColor = "#000000";
+          try {
+            await runEncode(false);
+          } finally {
+            state.pad = savedPad;
+          }
+        } else {
+          await runEncode(false);
+        }
+        state.lastExportKeptAudio = false;
+        state.lastAudioWarning = "Audio couldn’t be kept on this browser";
+        setStatus(state.lastAudioWarning, "error");
+      }
     }
   }
 
@@ -855,7 +995,7 @@ async function exportVideoFFmpeg() {
   state.lastVideoMime = "video/mp4";
   state.lastVideoExt = "mp4";
   ffmpegProgress.style.width = "100%";
-  ffmpegMsg.textContent = "Done";
+  ffmpegMsg.textContent = state.lastExportKeptAudio ? "Done (H.264 + AAC)" : "Done (video only — no audio)";
   return blob;
 }
 
@@ -906,7 +1046,11 @@ async function onExport() {
     const blob = await createExport();
     const name = getExportName();
     downloadBlob(blob, name);
-    setStatus(`Saved ${name} (${formatBytes(blob.size)})`, "success");
+    if (state.lastAudioWarning) {
+      setStatus(`Saved ${name} (${formatBytes(blob.size)}). ${state.lastAudioWarning}.`, "error");
+    } else {
+      setStatus(`Saved ${name} (${formatBytes(blob.size)})`, "success");
+    }
   } catch (err) {
     console.error(err);
     setStatus(err.message || "Export failed", "error");
@@ -955,7 +1099,11 @@ async function onShare() {
       title: "WhatsApp Status",
       files: [file],
     });
-    setStatus("Shared successfully.", "success");
+    if (state.lastAudioWarning) {
+      setStatus(`Shared. ${state.lastAudioWarning}.`, "error");
+    } else {
+      setStatus("Shared successfully.", "success");
+    }
   } catch (err) {
     if (err && err.name === "AbortError") {
       setStatus("Share canceled.");
