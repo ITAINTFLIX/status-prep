@@ -51,7 +51,7 @@ Cross-Origin Isolation is **not** required for the default `@ffmpeg/ffmpeg` + `@
 1. Drop or choose a photo or video.
 2. Pick **Fit** or **Fill**, resolution, and (for photos) JPEG/PNG.
 3. For videos longer than ~30s, leave **Trim to first 30s** on (Status default), or uncheck to keep more (WhatsApp may still limit).
-4. Tap **Download** and share the file to WhatsApp Status.
+4. Tap **Share to WhatsApp** on a supported mobile browser, or use **Download** to save the file and share it manually.
 
 ## Tech
 

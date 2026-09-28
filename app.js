@@ -49,6 +49,7 @@ const padOptions = $("#pad-options");
 const colorPickerWrap = $("#color-picker-wrap");
 const modeHint = $("#mode-hint");
 const durationHint = $("#duration-hint");
+const shareBtn = $("#share-btn");
 const exportBtn = $("#export-btn");
 const exportBtnLabel = $("#export-btn-label");
 const exportStatus = $("#export-status");
@@ -565,35 +566,95 @@ async function exportVideo() {
   return blob;
 }
 
+function getExportName() {
+  if (state.kind === "image") {
+    const ext = state.fmt === "png" ? "png" : "jpg";
+    return `${baseName(state.file.name)}_status_${state.res}.${ext}`;
+  }
+  return `${baseName(state.file.name)}_status_${state.res}.mp4`;
+}
+
+async function createExport() {
+  if (state.kind === "image") return exportImageBlob();
+  ffmpegStatus.classList.remove("hidden");
+  return exportVideo();
+}
+
+function setExporting(exporting) {
+  state.exporting = exporting;
+  shareBtn.disabled = exporting;
+  exportBtn.disabled = exporting;
+}
+
 async function onExport() {
   if (!state.file || state.exporting) return;
-  state.exporting = true;
-  exportBtn.disabled = true;
+  setExporting(true);
   setStatus("Working…");
 
   try {
-    if (state.kind === "image") {
-      const blob = await exportImageBlob();
-      const ext = state.fmt === "png" ? "png" : "jpg";
-      const name = `${baseName(state.file.name)}_status_${state.res}.${ext}`;
-      downloadBlob(blob, name);
-      setStatus(`Saved ${name} (${formatBytes(blob.size)})`, "success");
-    } else {
-      ffmpegStatus.classList.remove("hidden");
-      const blob = await exportVideo();
-      const name = `${baseName(state.file.name)}_status_${state.res}.mp4`;
-      downloadBlob(blob, name);
-      setStatus(`Saved ${name} (${formatBytes(blob.size)})`, "success");
-    }
+    const blob = await createExport();
+    const name = getExportName();
+    downloadBlob(blob, name);
+    setStatus(`Saved ${name} (${formatBytes(blob.size)})`, "success");
   } catch (err) {
     console.error(err);
     setStatus(err.message || "Export failed", "error");
   } finally {
-    state.exporting = false;
-    exportBtn.disabled = false;
+    setExporting(false);
   }
 }
 
+async function onShare() {
+  if (!state.file || state.exporting) return;
+  setExporting(true);
+  setStatus("Preparing share…");
+
+  let blob;
+  let name;
+  try {
+    blob = await createExport();
+    name = getExportName();
+    let file = null;
+    try {
+      if (typeof File !== "undefined") file = new File([blob], name, { type: blob.type });
+    } catch {
+      /* Fall back to download when File sharing is unavailable. */
+    }
+
+    let supportsFileShare = false;
+    if (file && typeof navigator.share === "function") {
+      try {
+        supportsFileShare = !navigator.canShare || navigator.canShare({ files: [file] });
+      } catch {
+        supportsFileShare = false;
+      }
+    }
+
+    if (!supportsFileShare) {
+      downloadBlob(blob, name);
+      setStatus("Sharing isn’t supported here — downloaded the file. Use your browser’s share menu to send it to WhatsApp.", "success");
+      return;
+    }
+
+    await navigator.share({
+      title: "WhatsApp Status",
+      files: [file],
+    });
+    setStatus("Shared successfully.", "success");
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      setStatus("Share canceled.");
+    } else if (err && err.name === "NotAllowedError" && blob && name) {
+      downloadBlob(blob, name);
+      setStatus("Share was unavailable — downloaded the file. Use your browser’s share menu to send it to WhatsApp.", "success");
+    } else {
+      console.error(err);
+      setStatus(err.message || "Share failed", "error");
+    }
+  } finally {
+    setExporting(false);
+  }
+}
 function openPicker() {
   fileInput.click();
 }
@@ -698,6 +759,7 @@ trim30Check.addEventListener("change", () => {
   state.trim30 = trim30Check.checked;
 });
 
+shareBtn.addEventListener("click", onShare);
 exportBtn.addEventListener("click", onExport);
 
 window.addEventListener("resize", () => {
