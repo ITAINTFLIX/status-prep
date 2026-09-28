@@ -1,6 +1,8 @@
 /**
  * Status Prep — WhatsApp Status photo/video preparation
- * Runs entirely in-browser. Photos via Canvas; videos via ffmpeg.wasm.
+ * Runs entirely in-browser. Photos via Canvas; videos via ffmpeg.wasm
+ * (desktop) or Canvas + MediaRecorder (iOS / ffmpeg fallback).
+ * Marker: ios-phone-encoder-v1
  */
 
 const RES_MAP = {
@@ -10,6 +12,7 @@ const RES_MAP = {
 
 const JPEG_QUALITY = 0.92;
 const STATUS_MAX_SECONDS = 30;
+const FFMPEG_LOAD_TIMEOUT_MS = 18000;
 const FFMPEG_BASE = "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm";
 const FFMPEG_CORE_BASE = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm";
 const UTIL_BASE = "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm";
@@ -31,6 +34,9 @@ const state = {
   ffmpeg: null,
   ffmpegLoaded: false,
   ffmpegLoading: false,
+  ffmpegFailed: false,
+  lastVideoMime: "video/mp4",
+  lastVideoExt: "mp4",
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -106,9 +112,30 @@ function isHeic(file) {
   );
 }
 
+/** iPhone / iPad / iPod, or iPadOS desktop-UA with touch. */
+function isIOSDevice() {
+  const ua = navigator.userAgent || "";
+  if (/iPad|iPhone|iPod/.test(ua)) return true;
+  // iPadOS 13+ may report as MacIntel with touch
+  if (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) return true;
+  return false;
+}
+
+/** Safari (including iOS), excluding Chrome/Firefox/Edge/CriOS/FxiOS. */
+function isSafariBrowser() {
+  const ua = navigator.userAgent || "";
+  const isSafari = /Safari/i.test(ua) && !/Chrome|CriOS|Chromium|Edg|FXIOS|Firefox/i.test(ua);
+  return isSafari;
+}
+
+function prefersPhoneEncoder() {
+  return isIOSDevice() || (isSafariBrowser() && /Mobile/i.test(navigator.userAgent || ""));
+}
+
 function updateExportLabel() {
   if (state.kind === "video") {
-    exportBtnLabel.textContent = "Download MP4";
+    const ext = state.lastVideoExt === "webm" ? "WebM" : "MP4";
+    exportBtnLabel.textContent = `Download ${ext}`;
   } else {
     exportBtnLabel.textContent = state.fmt === "png" ? "Download PNG" : "Download JPEG";
   }
@@ -342,6 +369,14 @@ function resetMedia() {
   state.videoDuration = 0;
 }
 
+function resolveExportSize() {
+  let key = state.res;
+  if (prefersPhoneEncoder() && key === "1440") {
+    key = "1080";
+  }
+  return { key, ...RES_MAP[key] };
+}
+
 async function handleFile(file) {
   if (!file) return;
   setStatus("");
@@ -358,15 +393,19 @@ async function handleFile(file) {
       videoOptions.classList.remove("hidden");
       playPauseBtn.classList.remove("hidden");
 
-      // Warm the encoder while the user chooses export settings so the first
-      // download does not have to wait for the ~30MB ffmpeg.wasm payload.
-      void ensureFFmpeg().catch((err) => console.warn("Background encoder preload failed", err));
+      // Skip aggressive ffmpeg preload on iOS — it often hangs (no SharedArrayBuffer / memory).
+      if (!prefersPhoneEncoder() && !state.ffmpegFailed) {
+        void ensureFFmpeg().catch((err) => console.warn("Background encoder preload failed", err));
+      }
 
       if (state.videoDuration > STATUS_MAX_SECONDS) {
         durationHint.textContent = `Source is ${formatDuration(state.videoDuration)} — longer than typical Status (30s). Trim is on by default.`;
         durationHint.classList.add("warn");
         trim30Check.checked = true;
         state.trim30 = true;
+      } else if (prefersPhoneEncoder()) {
+        durationHint.textContent = `Duration ${formatDuration(state.videoDuration)} · phone encoder (Canvas + MediaRecorder)`;
+        durationHint.classList.remove("warn");
       } else {
         durationHint.textContent = `Duration ${formatDuration(state.videoDuration)} · H.264 + AAC MP4 export`;
         durationHint.classList.remove("warn");
@@ -398,13 +437,23 @@ async function handleFile(file) {
   }
 }
 
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(label || `Timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function ensureFFmpeg() {
+  if (state.ffmpegFailed) throw new Error("ffmpeg unavailable");
   if (state.ffmpegLoaded && state.ffmpeg) return state.ffmpeg;
   if (state.ffmpegLoading) {
     while (state.ffmpegLoading) {
       await new Promise((r) => setTimeout(r, 100));
     }
     if (state.ffmpegLoaded) return state.ffmpeg;
+    if (state.ffmpegFailed) throw new Error("ffmpeg unavailable");
   }
 
   state.ffmpegLoading = true;
@@ -431,7 +480,11 @@ async function ensureFFmpeg() {
 
     ffmpegMsg.textContent = "Initializing ffmpeg core…";
     ffmpegProgress.style.width = "15%";
-    await ffmpeg.load({ coreURL, wasmURL });
+    await withTimeout(
+      ffmpeg.load({ coreURL, wasmURL }),
+      FFMPEG_LOAD_TIMEOUT_MS,
+      "ffmpeg load timed out"
+    );
 
     state.ffmpeg = ffmpeg;
     state.ffmpegLoaded = true;
@@ -440,8 +493,11 @@ async function ensureFFmpeg() {
     return ffmpeg;
   } catch (err) {
     console.error(err);
-    ffmpegMsg.textContent = "Failed to load ffmpeg.wasm — check network / CDN";
-    throw new Error("Could not load ffmpeg.wasm. Stay online for the first video export.");
+    state.ffmpegFailed = true;
+    state.ffmpeg = null;
+    state.ffmpegLoaded = false;
+    ffmpegMsg.textContent = "ffmpeg unavailable — switching to phone encoder…";
+    throw err;
   } finally {
     state.ffmpegLoading = false;
   }
@@ -463,10 +519,247 @@ function buildSimpleVf(dstW, dstH) {
   return `scale=${dstW}:${dstH}:force_original_aspect_ratio=decrease,pad=${dstW}:${dstH}:(ow-iw)/2:(oh-ih)/2:color=0x${hex}`;
 }
 
-async function exportVideo() {
+function pickRecorderMime() {
+  const candidates = [
+    "video/mp4",
+    "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+    "video/webm;codecs=vp9,opus",
+    "video/webm;codecs=vp8,opus",
+    "video/webm",
+  ];
+  if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) {
+    return candidates[0];
+  }
+  for (const m of candidates) {
+    try {
+      if (MediaRecorder.isTypeSupported(m)) return m;
+    } catch {
+      /* ignore */
+    }
+  }
+  return "";
+}
+
+function drawVideoFrameToCanvas(ctx, video, W, H) {
+  const srcW = video.videoWidth || 1;
+  const srcH = video.videoHeight || 1;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, W, H);
+
+  if (state.mode === "fill") {
+    const L = layoutCover(srcW, srcH, W, H);
+    ctx.drawImage(video, L.x, L.y, L.w, L.h);
+    return;
+  }
+
+  if (state.pad === "blur") {
+    const cover = layoutCover(srcW, srcH, W, H);
+    ctx.save();
+    ctx.filter = "blur(36px) brightness(0.55)";
+    ctx.drawImage(video, cover.x, cover.y, cover.w, cover.h);
+    ctx.restore();
+  } else {
+    ctx.fillStyle = state.padColor || "#000000";
+    ctx.fillRect(0, 0, W, H);
+  }
+  const L = layoutContain(srcW, srcH, W, H);
+  ctx.drawImage(video, L.x, L.y, L.w, L.h);
+}
+
+/**
+ * Canvas + MediaRecorder path for iOS / Safari / ffmpeg failure.
+ * Draws 9:16 frames, honors trim, prefers mp4 then webm.
+ */
+async function exportVideoMediaRecorder() {
+  if (typeof MediaRecorder === "undefined") {
+    throw new Error("MediaRecorder is not available in this browser.");
+  }
+
+  const { key: resKey, w: dstW, h: dstH } = resolveExportSize();
+  if (state.res === "1440" && resKey === "1080") {
+    setStatus("Using 1080×1920 on this phone (1440 is too heavy)…");
+  }
+
+  ffmpegStatus.classList.remove("hidden");
+  ffmpegProgress.style.width = "8%";
+  ffmpegMsg.textContent = "Using phone encoder…";
+  setStatus("Using phone encoder…");
+
+  const mime = pickRecorderMime();
+  const isWebm = mime.includes("webm");
+  state.lastVideoMime = isWebm ? "video/webm" : "video/mp4";
+  state.lastVideoExt = isWebm ? "webm" : "mp4";
+  updateExportLabel();
+
+  const canvas = document.createElement("canvas");
+  canvas.width = dstW;
+  canvas.height = dstH;
+  const ctx = canvas.getContext("2d", { alpha: false });
+
+  // Dedicated video element so we can seek / unmute without fighting the preview.
+  const video = document.createElement("video");
+  video.playsInline = true;
+  video.muted = false;
+  video.preload = "auto";
+  video.src = state.video;
+  video.crossOrigin = "anonymous";
+
+  await new Promise((resolve, reject) => {
+    video.onloadedmetadata = () => resolve();
+    video.onerror = () => reject(new Error("Could not load video for encoding"));
+  });
+
+  const duration = Number.isFinite(video.duration) ? video.duration : state.videoDuration;
+  const endTime = state.trim30
+    ? Math.min(STATUS_MAX_SECONDS, duration || STATUS_MAX_SECONDS)
+    : duration || STATUS_MAX_SECONDS;
+
+  if (!Number.isFinite(endTime) || endTime <= 0) {
+    throw new Error("Could not determine video duration.");
+  }
+
+  video.currentTime = 0;
+  await new Promise((resolve) => {
+    const done = () => {
+      video.removeEventListener("seeked", done);
+      resolve();
+    };
+    video.addEventListener("seeked", done);
+    // Some browsers fire seeked immediately at 0
+    setTimeout(done, 250);
+  });
+
+  const fps = 30;
+  let stream;
+  try {
+    stream = canvas.captureStream(fps);
+  } catch (err) {
+    throw new Error("Canvas captureStream is not supported on this browser.");
+  }
+
+  // Best-effort audio from the source video.
+  try {
+    if (typeof video.captureStream === "function") {
+      const vStream = video.captureStream();
+      const audioTracks = vStream.getAudioTracks();
+      if (audioTracks.length) {
+        stream.addTrack(audioTracks[0]);
+      }
+    }
+  } catch (err) {
+    console.warn("Audio capture unavailable", err);
+  }
+
+  const chunks = [];
+  const recorderOpts = mime ? { mimeType: mime, videoBitsPerSecond: 8_000_000 } : { videoBitsPerSecond: 8_000_000 };
+  let recorder;
+  try {
+    recorder = new MediaRecorder(stream, recorderOpts);
+  } catch {
+    recorder = new MediaRecorder(stream);
+  }
+
+  recorder.ondataavailable = (e) => {
+    if (e.data && e.data.size > 0) chunks.push(e.data);
+  };
+
+  const stopped = new Promise((resolve, reject) => {
+    recorder.onstop = () => resolve();
+    recorder.onerror = (e) => reject(e.error || new Error("MediaRecorder failed"));
+  });
+
+  let rafId = 0;
+  let drawing = true;
+  const drawLoop = () => {
+    if (!drawing) return;
+    try {
+      drawVideoFrameToCanvas(ctx, video, dstW, dstH);
+    } catch (err) {
+      console.warn("Frame draw error", err);
+    }
+    const t = video.currentTime || 0;
+    const pct = Math.min(95, Math.round((t / endTime) * 100));
+    ffmpegProgress.style.width = `${Math.max(10, pct)}%`;
+    ffmpegMsg.textContent = `Using phone encoder… ${pct}%`;
+    rafId = requestAnimationFrame(drawLoop);
+  };
+
+  // Draw first frame before starting so the recorder has content.
+  drawVideoFrameToCanvas(ctx, video, dstW, dstH);
+  recorder.start(200);
+  rafId = requestAnimationFrame(drawLoop);
+
+  try {
+    await video.play();
+  } catch (err) {
+    // If unmuted play fails, retry muted (no audio track then).
+    video.muted = true;
+    await video.play();
+  }
+
+  await new Promise((resolve, reject) => {
+    const onTime = () => {
+      if (video.currentTime >= endTime - 0.05) {
+        video.pause();
+        cleanup();
+        resolve();
+      }
+    };
+    const onEnded = () => {
+      cleanup();
+      resolve();
+    };
+    const cleanup = () => {
+      video.removeEventListener("timeupdate", onTime);
+      video.removeEventListener("ended", onEnded);
+      clearTimeout(safety);
+    };
+    const safety = setTimeout(() => {
+      video.pause();
+      cleanup();
+      resolve();
+    }, (endTime + 3) * 1000);
+    video.addEventListener("timeupdate", onTime);
+    video.addEventListener("ended", onEnded);
+  });
+
+  drawing = false;
+  cancelAnimationFrame(rafId);
+  // Final frame
+  drawVideoFrameToCanvas(ctx, video, dstW, dstH);
+
+  if (recorder.state !== "inactive") {
+    recorder.stop();
+  }
+  await stopped;
+
+  // Stop tracks
+  try {
+    stream.getTracks().forEach((t) => t.stop());
+  } catch {
+    /* ignore */
+  }
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+
+  if (!chunks.length) {
+    throw new Error("Phone encoder produced an empty file. Try a shorter clip or Download on desktop.");
+  }
+
+  const blob = new Blob(chunks, { type: state.lastVideoMime });
+  ffmpegProgress.style.width = "100%";
+  ffmpegMsg.textContent = "Done (phone encoder)";
+  setStatus("");
+  return blob;
+}
+
+async function exportVideoFFmpeg() {
   const { fetchFile } = await import(`${UTIL_BASE}/index.js`);
   const ffmpeg = await ensureFFmpeg();
-  const { w: dstW, h: dstH } = RES_MAP[state.res];
+  const { w: dstW, h: dstH } = resolveExportSize();
 
   const inName = "input" + extForVideo(state.file);
   const outName = "output.mp4";
@@ -475,7 +768,7 @@ async function exportVideo() {
   ffmpegProgress.style.width = "20%";
   await ffmpeg.writeFile(inName, await fetchFile(state.file));
 
-  const is1440 = state.res === "1440";
+  const is1440 = state.res === "1440" && dstW === 1440;
   const crf = is1440 ? "22" : "23";
   const maxrate = is1440 ? "14M" : "10M";
   const bufsize = is1440 ? "28M" : "20M";
@@ -535,9 +828,7 @@ async function exportVideo() {
     } catch {
       /* may not exist */
     }
-    // Fallback: solid pad if blur graph failed, no audio
     if (useBlurPad) {
-      // Force simple pad path on retry
       const savedPad = state.pad;
       state.pad = "solid";
       state.padColor = "#000000";
@@ -561,9 +852,28 @@ async function exportVideo() {
     /* ignore */
   }
 
+  state.lastVideoMime = "video/mp4";
+  state.lastVideoExt = "mp4";
   ffmpegProgress.style.width = "100%";
   ffmpegMsg.textContent = "Done";
   return blob;
+}
+
+async function exportVideo() {
+  // Prefer phone encoder on iOS / mobile Safari; otherwise try ffmpeg with timeout fallback.
+  if (prefersPhoneEncoder() || state.ffmpegFailed) {
+    return exportVideoMediaRecorder();
+  }
+
+  try {
+    return await exportVideoFFmpeg();
+  } catch (err) {
+    console.warn("ffmpeg path failed, falling back to MediaRecorder", err);
+    state.ffmpegFailed = true;
+    ffmpegMsg.textContent = "Switching to phone encoder…";
+    setStatus("ffmpeg stalled — using phone encoder…");
+    return exportVideoMediaRecorder();
+  }
 }
 
 function getExportName() {
@@ -571,7 +881,8 @@ function getExportName() {
     const ext = state.fmt === "png" ? "png" : "jpg";
     return `${baseName(state.file.name)}_status_${state.res}.${ext}`;
   }
-  return `${baseName(state.file.name)}_status_${state.res}.mp4`;
+  const { key } = resolveExportSize();
+  return `${baseName(state.file.name)}_status_${key}.${state.lastVideoExt || "mp4"}`;
 }
 
 async function createExport() {
@@ -589,7 +900,7 @@ function setExporting(exporting) {
 async function onExport() {
   if (!state.file || state.exporting) return;
   setExporting(true);
-  setStatus("Working…");
+  setStatus(prefersPhoneEncoder() && state.kind === "video" ? "Using phone encoder…" : "Working…");
 
   try {
     const blob = await createExport();
@@ -607,7 +918,11 @@ async function onExport() {
 async function onShare() {
   if (!state.file || state.exporting) return;
   setExporting(true);
-  setStatus("Preparing share…");
+  setStatus(
+    prefersPhoneEncoder() && state.kind === "video"
+      ? "Preparing share with phone encoder…"
+      : "Preparing share…"
+  );
 
   let blob;
   let name;
@@ -616,7 +931,7 @@ async function onShare() {
     name = getExportName();
     let file = null;
     try {
-      if (typeof File !== "undefined") file = new File([blob], name, { type: blob.type });
+      if (typeof File !== "undefined") file = new File([blob], name, { type: blob.type || state.lastVideoMime });
     } catch {
       /* Fall back to download when File sharing is unavailable. */
     }

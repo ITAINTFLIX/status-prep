@@ -7,9 +7,10 @@ Prepare photos and short videos for **WhatsApp Status** at high quality (up to 1
 - Drag-and-drop or file picker for images (JPG, PNG, WebP, HEIC best-effort) and videos (MP4, MOV, WebM)
 - Live 9:16 preview
 - **Fit** (letterbox with blur or solid pad) and **Fill** (center crop)
-- Export at **1080×1920** (recommended) or **1440×2560** (max prep)
+- Export at **1080×1920** (recommended) or **1440×2560** (max prep; capped to 1080 on iPhone)
 - Photos: high-quality JPEG (~0.92) or PNG via Canvas
-- Videos: ffmpeg.wasm → H.264 + AAC MP4, optional trim to first 30s
+- Videos: ffmpeg.wasm on desktop → H.264 + AAC MP4; on **iOS Safari** (and if ffmpeg stalls) → **Canvas + MediaRecorder** phone encoder
+- **Share to WhatsApp** via the Web Share API when available
 - Dark, mobile-friendly UI
 
 ## Disclaimer
@@ -58,17 +59,19 @@ Cross-Origin Isolation is **not** required for the default `@ffmpeg/ffmpeg` + `@
 | Piece | Approach |
 |--------|----------|
 | Photos | Canvas 2D, `createImageBitmap` when available |
-| Videos | `@ffmpeg/ffmpeg` + `@ffmpeg/core` + `@ffmpeg/util` from jsDelivr CDN |
+| Videos (desktop) | `@ffmpeg/ffmpeg` + `@ffmpeg/core` + `@ffmpeg/util` from jsDelivr CDN |
+| Videos (iOS / fallback) | Canvas `captureStream` + `MediaRecorder` (mp4 or webm) — marker `ios-phone-encoder-v1` |
 | UI | Vanilla HTML / CSS / JS |
 
-The first video export downloads the ffmpeg.wasm encoder (~25–30 MB) once; selecting a video starts that download in the background. Photos work offline after the page is cached. For the fastest hosted page load, use the [GitHub Pages URL](https://itaintflix.github.io/status-prep/).
+On iPhone/iPad, ffmpeg.wasm is skipped (it often hangs without SharedArrayBuffer / under memory pressure). The status line shows **Using phone encoder…** instead of a stuck “Initializing ffmpeg core…”. Desktop Chrome/Firefox still preload and use ffmpeg; if load takes longer than ~18s, the app falls back to MediaRecorder.
 
 ## Caveats
 
 - **HEIC/HEIF** decoding depends on the browser (often Safari). Others should convert to JPEG/PNG first.
 - Video encoding is CPU-heavy in-browser; large/long clips can take a while.
-- Solid pad is the default fast path. Blur pad on video uses an ffmpeg filter graph and is slower; if it fails, the app retries with a solid black pad.
+- Solid pad is the default fast path. Blur pad on video uses an ffmpeg filter graph (or canvas blur on the phone path); if it fails, the app retries with a solid black pad.
 - Preview for video approximates Fit/Fill with CSS `object-fit`; the exported file uses exact scale/crop/pad.
+- Phone encoder may produce WebM when MP4 isn’t supported by MediaRecorder; WhatsApp’s iOS share sheet usually accepts both.
 
 ## License
 
