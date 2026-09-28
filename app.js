@@ -17,7 +17,7 @@ const UTIL_BASE = "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm";
 /** @type {object} */
 const state = {
   mode: "fit",
-  pad: "blur",
+  pad: "solid",
   padColor: "#000000",
   res: "1080",
   fmt: "jpeg",
@@ -357,6 +357,10 @@ async function handleFile(file) {
       videoOptions.classList.remove("hidden");
       playPauseBtn.classList.remove("hidden");
 
+      // Warm the encoder while the user chooses export settings so the first
+      // download does not have to wait for the ~30MB ffmpeg.wasm payload.
+      void ensureFFmpeg().catch((err) => console.warn("Background encoder preload failed", err));
+
       if (state.videoDuration > STATUS_MAX_SECONDS) {
         durationHint.textContent = `Source is ${formatDuration(state.videoDuration)} — longer than typical Status (30s). Trim is on by default.`;
         durationHint.classList.add("warn");
@@ -405,7 +409,7 @@ async function ensureFFmpeg() {
   state.ffmpegLoading = true;
   ffmpegStatus.classList.remove("hidden");
   ffmpegProgress.style.width = "5%";
-  ffmpegMsg.textContent = "Loading ffmpeg.wasm (first time may take a moment)…";
+  ffmpegMsg.textContent = "Downloading encoder (~30MB, once)…";
 
   try {
     const { FFmpeg } = await import(`${FFMPEG_BASE}/index.js`);
@@ -431,7 +435,7 @@ async function ensureFFmpeg() {
     state.ffmpeg = ffmpeg;
     state.ffmpegLoaded = true;
     ffmpegProgress.style.width = "100%";
-    ffmpegMsg.textContent = "ffmpeg ready";
+    ffmpegMsg.textContent = "Encoder ready";
     return ffmpeg;
   } catch (err) {
     console.error(err);
@@ -471,7 +475,7 @@ async function exportVideo() {
   await ffmpeg.writeFile(inName, await fetchFile(state.file));
 
   const is1440 = state.res === "1440";
-  const crf = is1440 ? "20" : "21";
+  const crf = is1440 ? "22" : "23";
   const maxrate = is1440 ? "14M" : "10M";
   const bufsize = is1440 ? "28M" : "20M";
 
@@ -501,7 +505,7 @@ async function exportVideo() {
 
     args.push(
       "-c:v", "libx264",
-      "-preset", "medium",
+      "-preset", "ultrafast",
       "-crf", crf,
       "-maxrate", maxrate,
       "-bufsize", bufsize,

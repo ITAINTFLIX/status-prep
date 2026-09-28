@@ -26,7 +26,7 @@ python3 -m http.server 8080
 
 Open `http://localhost:8080` in a modern browser.
 
-> **Note:** `file://` may block ES module / CDN loads. Prefer a local static server (or Netlify / any static host).
+> **Note:** `file://` may block ES module / CDN loads. Prefer a local static server (or Netlify / any static host). For a snappier hosted static experience, use the [GitHub Pages URL](https://itaintflix.github.io/status-prep/).
 
 ## Deploy (static)
 
@@ -61,13 +61,13 @@ Cross-Origin Isolation is **not** required for the default `@ffmpeg/ffmpeg` + `@
 | Videos | `@ffmpeg/ffmpeg` + `@ffmpeg/core` + `@ffmpeg/util` from jsDelivr CDN |
 | UI | Vanilla HTML / CSS / JS |
 
-First video export downloads the ffmpeg wasm core (~25–30 MB); photos work offline after the page and fonts are cached.
+The first video export downloads the ffmpeg.wasm encoder (~25–30 MB) once; selecting a video starts that download in the background. Photos work offline after the page is cached. For the fastest hosted page load, use the [GitHub Pages URL](https://itaintflix.github.io/status-prep/).
 
 ## Caveats
 
 - **HEIC/HEIF** decoding depends on the browser (often Safari). Others should convert to JPEG/PNG first.
 - Video encoding is CPU-heavy in-browser; large/long clips can take a while.
-- Blur pad on video uses an ffmpeg filter graph; if it fails, the app retries with a solid black pad.
+- Solid pad is the default fast path. Blur pad on video uses an ffmpeg filter graph and is slower; if it fails, the app retries with a solid black pad.
 - Preview for video approximates Fit/Fill with CSS `object-fit`; the exported file uses exact scale/crop/pad.
 
 ## License
