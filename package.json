@@ -1,0 +1,7 @@
+{
+  "name": "status-prep",
+  "private": true,
+  "scripts": {
+    "start": "npx --yes serve -s . -l $PORT"
+  }
+}

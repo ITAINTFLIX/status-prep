@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="description" content="Prepare photos and short videos for WhatsApp Status at high quality (up to 1440p)." />
+  <meta name="theme-color" content="#0b0f14" />
+  <title>Status Prep — WhatsApp Status</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+            <rect x="6" y="2" width="16" height="24" rx="3" stroke="currentColor" stroke-width="2"/>
+            <circle cx="14" cy="22" r="1.5" fill="currentColor"/>
+          </svg>
+        </div>
+        <div>
+          <h1>Status Prep</h1>
+          <p class="subtitle">High-quality prep for WhatsApp Status · up to 1440p</p>
+        </div>
+      </div>
+    </header>
+
+    <main class="main">
+      <!-- Upload zone -->
+      <section id="upload-section" class="panel upload-panel">
+        <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Upload photo or video">
+          <div class="dropzone-inner">
+            <div class="drop-icon" aria-hidden="true">
+              <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                <path d="M24 8v24M24 8l-8 8M24 8l8 8" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M8 32v6a2 2 0 002 2h28a2 2 0 002-2v-6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <p class="drop-title">Drop a photo or video</p>
+            <p class="drop-hint">or click to browse · JPG, PNG, WebP, HEIC · MP4, MOV, WebM</p>
+            <button type="button" class="btn btn-primary" id="browse-btn">Choose file</button>
+          </div>
+          <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,video/mp4,video/quicktime,video/webm,.heic,.heif,.mov" hidden />
+        </div>
+      </section>
+
+      <!-- Editor (hidden until file loaded) -->
+      <section id="editor-section" class="editor hidden" aria-live="polite">
+        <div class="editor-grid">
+          <!-- Preview -->
+          <div class="preview-col">
+            <div class="preview-frame-wrap">
+              <div id="preview-frame" class="preview-frame">
+                <canvas id="preview-canvas"></canvas>
+                <video id="preview-video" playsinline muted loop class="hidden"></video>
+                <div id="frame-overlay" class="frame-overlay" aria-hidden="true"></div>
+              </div>
+              <p class="preview-label"><span id="media-type-badge">Photo</span> · <span id="source-info">—</span></p>
+            </div>
+            <div class="preview-actions">
+              <button type="button" class="btn btn-ghost" id="change-file-btn">Change file</button>
+              <button type="button" class="btn btn-ghost hidden" id="play-pause-btn">Play / Pause</button>
+            </div>
+          </div>
+
+          <!-- Controls -->
+          <div class="controls-col">
+            <div class="control-group">
+              <label class="control-label">Mode</label>
+              <div class="segmented" role="group" aria-label="Fit mode">
+                <button type="button" class="seg-btn active" data-mode="fit" id="mode-fit">Fit</button>
+                <button type="button" class="seg-btn" data-mode="fill" id="mode-fill">Fill</button>
+              </div>
+              <p class="control-hint" id="mode-hint">Letterbox / pad to 9:16 without cropping</p>
+            </div>
+
+            <div class="control-group" id="pad-options">
+              <label class="control-label">Pad style (Fit mode)</label>
+              <div class="segmented" role="group" aria-label="Pad style">
+                <button type="button" class="seg-btn active" data-pad="blur" id="pad-blur">Blur</button>
+                <button type="button" class="seg-btn" data-pad="solid" id="pad-solid">Solid</button>
+              </div>
+              <div id="color-picker-wrap" class="color-row hidden">
+                <label for="pad-color">Pad color</label>
+                <input type="color" id="pad-color" value="#000000" />
+              </div>
+            </div>
+
+            <div class="control-group">
+              <label class="control-label">Export resolution</label>
+              <div class="segmented" role="group" aria-label="Resolution">
+                <button type="button" class="seg-btn active" data-res="1080" id="res-1080">1080×1920</button>
+                <button type="button" class="seg-btn" data-res="1440" id="res-1440">1440×2560</button>
+              </div>
+              <p class="control-hint">1080p recommended · 1440p max prep quality</p>
+            </div>
+
+            <!-- Photo-only options -->
+            <div class="control-group" id="photo-options">
+              <label class="control-label">Photo format</label>
+              <div class="segmented" role="group" aria-label="Image format">
+                <button type="button" class="seg-btn active" data-fmt="jpeg" id="fmt-jpeg">JPEG</button>
+                <button type="button" class="seg-btn" data-fmt="png" id="fmt-png">PNG</button>
+              </div>
+              <p class="control-hint">JPEG quality ~0.92 · PNG lossless</p>
+            </div>
+
+            <!-- Video-only options -->
+            <div class="control-group hidden" id="video-options">
+              <label class="control-label">Duration</label>
+              <div class="trim-row">
+                <label class="check-label">
+                  <input type="checkbox" id="trim-30" checked />
+                  <span>Trim to first 30s <span class="muted">(Status default)</span></span>
+                </label>
+              </div>
+              <p class="control-hint" id="duration-hint">—</p>
+              <div id="ffmpeg-status" class="ffmpeg-status hidden">
+                <div class="progress-bar"><div id="ffmpeg-progress" class="progress-fill"></div></div>
+                <p id="ffmpeg-msg" class="ffmpeg-msg">Loading ffmpeg…</p>
+              </div>
+            </div>
+
+            <div class="export-actions">
+              <button type="button" class="btn btn-primary btn-lg" id="export-btn">
+                <span id="export-btn-label">Download JPEG</span>
+              </button>
+              <p id="export-status" class="export-status" aria-live="polite"></p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Disclaimer -->
+      <aside class="disclaimer panel">
+        <strong>Note:</strong> WhatsApp re-encodes Status media on upload. This tool maximizes quality <em>before</em> you share — it cannot force the final Status bitrate or resolution WhatsApp delivers to viewers.
+      </aside>
+    </main>
+
+    <footer class="footer">
+      <p>Status Prep · runs entirely in your browser · no uploads to a server</p>
+    </footer>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
